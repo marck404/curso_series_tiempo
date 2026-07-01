@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""CLI de forecasting para `meantemp` con SARIMA y XGBoost.
+"""CLI de forecasting para `meantemp` con Suavizado Exponencial y XGBoost.
 
 Uso rapido:
 python forecast_climate.py \
   --train-file datasets/DailyDelhiClimateTrain.csv \
   --test-file datasets/DailyDelhiClimateTest.csv \
-  --models sarima xgb \
+  --models exsm xgb \
   --output-dir results
 """
 
@@ -79,9 +79,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--models",
         nargs="+",
-        choices=["sarima", "xgb"],
-        default=["sarima", "xgb"],
-        help="Modelos a ejecutar (sarima, xgb).",
+        choices=["exsm", "xgb"],
+        default=["exsm", "xgb"],
+        help="Modelos a ejecutar (exsm, xgb).",
     )
     parser.add_argument(
         "--output-dir",
@@ -99,8 +99,8 @@ def parse_args() -> argparse.Namespace:
         "--lags",
         nargs="+",
         type=int,
-        default=[1, 7, 14, 30, 364, 365, 366],
-        help="Lista de lags para crear features autoregresivas. Incluye lags anuales (364-366) para capturar seasonality.",
+        default=[1, 7, 14, 30, 364, 365, 366, 367],
+        help="Lista de lags para crear features autoregresivas. Incluye lags anuales (364-367) para capturar seasonality.",
     )
     parser.add_argument(
         "--rolling-windows",
@@ -110,46 +110,24 @@ def parse_args() -> argparse.Namespace:
         help="Ventanas para medias moviles de la variable objetivo. Incluye ventana anual (365) para seasonality.",
     )
     parser.add_argument(
-        "--sarima-p",
+        "--exsm-seasonal-periods",
         type=int,
-        default=2,
-        help="Orden AR (p) para SARIMA.",
+        default=365,
+        help="Periodo estacional para Exponential Smoothing (default: 365 dias).",
     )
     parser.add_argument(
-        "--sarima-d",
-        type=int,
-        default=1,
-        help="Orden de diferenciacion (d) para SARIMA.",
+        "--exsm-trend",
+        type=str,
+        choices=["add", "mul", None],
+        default="add",
+        help="Tipo de tendencia para Exponential Smoothing (add=aditiva, mul=multiplicativa, None=sin tendencia).",
     )
     parser.add_argument(
-        "--sarima-q",
-        type=int,
-        default=1,
-        help="Orden MA (q) para SARIMA.",
-    )
-    parser.add_argument(
-        "--sarima-P",
-        type=int,
-        default=1,
-        help="Orden AR estacional (P) para SARIMA.",
-    )
-    parser.add_argument(
-        "--sarima-D",
-        type=int,
-        default=1,
-        help="Orden de diferenciacion estacional (D) para SARIMA.",
-    )
-    parser.add_argument(
-        "--sarima-Q",
-        type=int,
-        default=0,
-        help="Orden MA estacional (Q) para SARIMA.",
-    )
-    parser.add_argument(
-        "--sarima-s",
-        type=int,
-        default=7,
-        help="Periodo estacional (s) para SARIMA. Default=7 (semanal).",
+        "--exsm-seasonal",
+        type=str,
+        choices=["add", "mul", None],
+        default="add",
+        help="Tipo de estacionalidad para Exponential Smoothing (add=aditiva, mul=multiplicativa, None=sin estacionalidad).",
     )
     parser.add_argument(
         "--xgb-estimators",
@@ -285,22 +263,26 @@ def metric_bundle(y_true: np.ndarray, y_pred: np.ndarray) -> Dict[str, float]:
     }
 
 
-def train_sarima(train_series: pd.Series, args: argparse.Namespace):
+def train_exponential_smoothing(train_series: pd.Series, args: argparse.Namespace):
     try:
-        from statsmodels.tsa.statespace.sarimax import SARIMAX
+        from statsmodels.tsa.holtwinters import ExponentialSmoothing
     except ImportError as exc:
         raise RuntimeError(
             "statsmodels no esta instalado. Instala dependencias con: pip install -r requirements.txt"
         ) from exc
 
-    model = SARIMAX(
+    # Convertir None strings a None reales
+    trend = None if args.exsm_trend == "None" else args.exsm_trend
+    seasonal = None if args.exsm_seasonal == "None" else args.exsm_seasonal
+
+    model = ExponentialSmoothing(
         train_series.values,
-        order=(args.sarima_p, args.sarima_d, args.sarima_q),
-        seasonal_order=(args.sarima_P, args.sarima_D, args.sarima_Q, args.sarima_s),
-        enforce_stationarity=False,
-        enforce_invertibility=False,
+        seasonal_periods=args.exsm_seasonal_periods,
+        trend=trend,
+        seasonal=seasonal,
+        initialization_method="estimated",
     )
-    fitted = model.fit(disp=False)
+    fitted = model.fit(optimized=True)
     return fitted
 
 
@@ -372,7 +354,7 @@ def main() -> None:
     train_df = load_dataset(train_path, args.target)
     test_df = load_dataset(test_path, args.target)
 
-    ml_models = [m for m in args.models if m != "sarima"]
+    ml_models = [m for m in args.models if m != "exsm"]
 
     # Preparar datos supervisados solo si hay modelos ML.
     X_train: pd.DataFrame | None = None
@@ -395,13 +377,12 @@ def main() -> None:
     y_true = test_df[args.target].to_numpy()
 
     for model_name in args.models:
-        if model_name == "sarima":
-            print(f"\nEntrenando SARIMA{(args.sarima_p, args.sarima_d, args.sarima_q)}"
-                  f"x{(args.sarima_P, args.sarima_D, args.sarima_Q, args.sarima_s)}...")
-            fitted = train_sarima(train_df[args.target], args)
+        if model_name == "exsm":
+            print(f"\nEntrenando Exponential Smoothing (seasonal_periods={args.exsm_seasonal_periods})...")
+            fitted = train_exponential_smoothing(train_df[args.target], args)
             y_pred = np.asarray(fitted.forecast(steps=len(test_df)))
             model_feature_importances[model_name] = {}
-            model_path = models_dir / "sarima_model.joblib"
+            model_path = models_dir / "exsm_model.joblib"
             joblib.dump(fitted, model_path)
         else:
             assert X_train is not None and y_train is not None
@@ -461,11 +442,12 @@ def main() -> None:
 
     best_model = metrics_df.iloc[0]["model"] if not metrics_df.empty else ""
 
-    sarima_params: Dict = {}
-    if "sarima" in args.models:
-        sarima_params = {
-            "order": [args.sarima_p, args.sarima_d, args.sarima_q],
-            "seasonal_order": [args.sarima_P, args.sarima_D, args.sarima_Q, args.sarima_s],
+    exsm_params: Dict = {}
+    if "exsm" in args.models:
+        exsm_params = {
+            "seasonal_periods": args.exsm_seasonal_periods,
+            "trend": args.exsm_trend,
+            "seasonal": args.exsm_seasonal,
         }
 
     run_metadata = {
@@ -474,7 +456,7 @@ def main() -> None:
         "train_file": str(train_path),
         "test_file": str(test_path),
         "models": args.models,
-        "sarima_params": sarima_params,
+        "exsm_params": exsm_params,
         "lags": args.lags if ml_models else [],
         "rolling_windows": args.rolling_windows if ml_models else [],
         "features_used": feature_names,

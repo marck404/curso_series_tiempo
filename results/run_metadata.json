@@ -1,37 +1,69 @@
 {
-  "run_timestamp": "2026-07-01T16:52:46.149859+00:00",
+  "run_timestamp": "2026-07-01T17:03:07.266290+00:00",
   "target": "meantemp",
   "train_file": "datasets/DailyDelhiClimateTrain.csv",
   "test_file": "datasets/DailyDelhiClimateTest.csv",
   "models": [
-    "sarima"
+    "exsm",
+    "xgb"
   ],
-  "sarima_params": {
-    "order": [
-      2,
-      1,
-      1
-    ],
-    "seasonal_order": [
-      1,
-      1,
-      0,
-      7
-    ]
+  "exsm_params": {
+    "seasonal_periods": 365,
+    "trend": "add",
+    "seasonal": "add"
   },
-  "lags": [],
-  "rolling_windows": [],
-  "features_used": [],
-  "best_model_by_rmse": "sarima",
+  "lags": [
+    1,
+    7,
+    14,
+    30,
+    364,
+    365,
+    366,
+    367
+  ],
+  "rolling_windows": [
+    7,
+    30,
+    365
+  ],
+  "features_used": [
+    "lag_1",
+    "lag_7",
+    "lag_14",
+    "lag_30",
+    "lag_364",
+    "lag_365",
+    "lag_366",
+    "lag_367",
+    "roll_mean_7",
+    "roll_mean_30",
+    "roll_mean_365",
+    "dayofweek",
+    "month",
+    "dayofyear",
+    "weekofyear"
+  ],
+  "best_model_by_rmse": "exsm",
   "artifacts": [
     {
-      "model": "sarima",
-      "model_path": "results/models/sarima_model.joblib",
+      "model": "exsm",
+      "model_path": "results/models/exsm_model.joblib",
       "metrics": {
-        "mae": 18.30357506759717,
-        "rmse": 21.938459275550958,
-        "mape": 75.57062157890041,
-        "smape": 127.43938132475839
+        "mae": 2.8127828365033127,
+        "rmse": 3.4381258818728577,
+        "mape": 13.048227467636442,
+        "smape": 14.422782830082761
+      }
+    },
+    {
+      "model": "xgb",
+      "model_path": "results/models/xgb_model.joblib",
+      "metrics": {
+        "mae": 3.021370877873174,
+        "rmse": 3.5984529921182253,
+        "mape": 13.790974639828166,
+        "smape": 14.96035056065943
       }
     }
   ]
