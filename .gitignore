@@ -1,0 +1,30 @@
+# Modelos entrenados
+*.joblib
+
+# Resultados y predicciones
+results/metrics_comparison.csv
+results/predictions_*.csv
+results/features_summary.csv
+results/run_metadata.json
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+.venv
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
