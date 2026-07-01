@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""CLI de forecasting para `meantemp` con modelos de ML basados en lags.
+"""CLI de forecasting para `meantemp` con SARIMA y XGBoost.
 
 Uso rapido:
 python forecast_climate.py \
   --train-file datasets/DailyDelhiClimateTrain.csv \
   --test-file datasets/DailyDelhiClimateTest.csv \
-  --models rf xgb \
+  --models sarima xgb \
   --output-dir results
 """
 
@@ -21,7 +21,6 @@ from typing import Dict, List, Sequence, Tuple
 import joblib
 import numpy as np
 import pandas as pd
-from sklearn.ensemble import RandomForestRegressor
 from sklearn.metrics import mean_absolute_error, mean_squared_error
 
 
@@ -80,9 +79,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--models",
         nargs="+",
-        choices=["rf", "xgb"],
-        default=["rf", "xgb"],
-        help="Modelos a ejecutar (rf, xgb).",
+        choices=["sarima", "xgb"],
+        default=["sarima", "xgb"],
+        help="Modelos a ejecutar (sarima, xgb).",
     )
     parser.add_argument(
         "--output-dir",
@@ -111,10 +110,46 @@ def parse_args() -> argparse.Namespace:
         help="Ventanas para medias moviles de la variable objetivo. Incluye ventana anual (365) para seasonality.",
     )
     parser.add_argument(
-        "--rf-estimators",
+        "--sarima-p",
         type=int,
-        default=220,
-        help="Numero de arboles para RandomForest.",
+        default=2,
+        help="Orden AR (p) para SARIMA.",
+    )
+    parser.add_argument(
+        "--sarima-d",
+        type=int,
+        default=1,
+        help="Orden de diferenciacion (d) para SARIMA.",
+    )
+    parser.add_argument(
+        "--sarima-q",
+        type=int,
+        default=1,
+        help="Orden MA (q) para SARIMA.",
+    )
+    parser.add_argument(
+        "--sarima-P",
+        type=int,
+        default=1,
+        help="Orden AR estacional (P) para SARIMA.",
+    )
+    parser.add_argument(
+        "--sarima-D",
+        type=int,
+        default=1,
+        help="Orden de diferenciacion estacional (D) para SARIMA.",
+    )
+    parser.add_argument(
+        "--sarima-Q",
+        type=int,
+        default=0,
+        help="Orden MA estacional (Q) para SARIMA.",
+    )
+    parser.add_argument(
+        "--sarima-s",
+        type=int,
+        default=7,
+        help="Periodo estacional (s) para SARIMA. Default=7 (semanal).",
     )
     parser.add_argument(
         "--xgb-estimators",
@@ -250,23 +285,31 @@ def metric_bundle(y_true: np.ndarray, y_pred: np.ndarray) -> Dict[str, float]:
     }
 
 
+def train_sarima(train_series: pd.Series, args: argparse.Namespace):
+    try:
+        from statsmodels.tsa.statespace.sarimax import SARIMAX
+    except ImportError as exc:
+        raise RuntimeError(
+            "statsmodels no esta instalado. Instala dependencias con: pip install -r requirements.txt"
+        ) from exc
+
+    model = SARIMAX(
+        train_series.values,
+        order=(args.sarima_p, args.sarima_d, args.sarima_q),
+        seasonal_order=(args.sarima_P, args.sarima_D, args.sarima_Q, args.sarima_s),
+        enforce_stationarity=False,
+        enforce_invertibility=False,
+    )
+    fitted = model.fit(disp=False)
+    return fitted
+
+
 def train_model(
     model_name: str,
     X_train: pd.DataFrame,
     y_train: pd.Series,
     args: argparse.Namespace,
 ):
-    if model_name == "rf":
-        model = RandomForestRegressor(
-            n_estimators=args.rf_estimators,
-            max_depth=8,
-            min_samples_leaf=2,
-            random_state=args.seed,
-            n_jobs=-1,
-        )
-        model.fit(X_train, y_train)
-        return model
-
     if model_name == "xgb":
         try:
             from xgboost import XGBRegressor
@@ -329,41 +372,54 @@ def main() -> None:
     train_df = load_dataset(train_path, args.target)
     test_df = load_dataset(test_path, args.target)
 
-    validate_window_requirements(len(train_df), args.lags, args.rolling_windows)
+    ml_models = [m for m in args.models if m != "sarima"]
 
-    X_train, y_train = build_supervised_matrix(
-        train_df[args.target],
-        train_df["date"],
-        args.lags,
-        args.rolling_windows,
-    )
-    feature_names = X_train.columns.tolist()
-
-    # Historial inicial para pronostico recursivo multi-step sin leakage del test.
-    initial_history = train_df[args.target].tolist()
+    # Preparar datos supervisados solo si hay modelos ML.
+    X_train: pd.DataFrame | None = None
+    y_train: pd.Series | None = None
+    feature_names: List[str] = []
+    initial_history: List[float] = []
+    if ml_models:
+        validate_window_requirements(len(train_df), args.lags, args.rolling_windows)
+        X_train, y_train = build_supervised_matrix(
+            train_df[args.target],
+            train_df["date"],
+            args.lags,
+            args.rolling_windows,
+        )
+        feature_names = X_train.columns.tolist()
+        initial_history = train_df[args.target].tolist()
 
     artifacts: List[ForecastArtifacts] = []
     model_feature_importances: Dict[str, Dict[str, float]] = {}
+    y_true = test_df[args.target].to_numpy()
+
     for model_name in args.models:
-        model = train_model(model_name, X_train, y_train, args)
-        model_feature_importances[model_name] = extract_feature_importances(model, feature_names)
+        if model_name == "sarima":
+            print(f"\nEntrenando SARIMA{(args.sarima_p, args.sarima_d, args.sarima_q)}"
+                  f"x{(args.sarima_P, args.sarima_D, args.sarima_Q, args.sarima_s)}...")
+            fitted = train_sarima(train_df[args.target], args)
+            y_pred = np.asarray(fitted.forecast(steps=len(test_df)))
+            model_feature_importances[model_name] = {}
+            model_path = models_dir / "sarima_model.joblib"
+            joblib.dump(fitted, model_path)
+        else:
+            assert X_train is not None and y_train is not None
+            model = train_model(model_name, X_train, y_train, args)
+            model_feature_importances[model_name] = extract_feature_importances(model, feature_names)
+            y_pred = recursive_forecast(
+                model=model,
+                history=initial_history,
+                future_dates=test_df["date"].tolist(),
+                lags=args.lags,
+                rolling_windows=args.rolling_windows,
+            )
+            model_path = models_dir / f"{model_name}_model.joblib"
+            joblib.dump(model, model_path)
 
-        y_pred = recursive_forecast(
-            model=model,
-            history=initial_history,
-            future_dates=test_df["date"].tolist(),
-            lags=args.lags,
-            rolling_windows=args.rolling_windows,
-        )
-
-        y_true = test_df[args.target].to_numpy()
         metrics = metric_bundle(y_true, y_pred)
-
         pred_path = output_dir / f"predictions_{model_name}.csv"
         save_predictions(pred_path, test_df["date"], y_true, y_pred)
-
-        model_path = models_dir / f"{model_name}_model.joblib"
-        joblib.dump(model, model_path)
 
         artifacts.append(
             ForecastArtifacts(
@@ -384,23 +440,33 @@ def main() -> None:
     metrics_path = output_dir / "metrics_comparison.csv"
     metrics_df.to_csv(metrics_path, index=False)
 
-    features_summary_rows = []
-    for feature_name in feature_names:
-        row = {
-            "feature": feature_name,
-            "feature_group": feature_group(feature_name),
-        }
-        for model_name in args.models:
-            row[f"importance_{model_name}"] = model_feature_importances.get(model_name, {}).get(
-                feature_name, np.nan
-            )
-        features_summary_rows.append(row)
+    # Features summary solo para modelos ML con importancias.
+    if feature_names:
+        ml_with_importances = [m for m in ml_models if model_feature_importances.get(m)]
+        features_summary_rows = []
+        for feature_name in feature_names:
+            row = {
+                "feature": feature_name,
+                "feature_group": feature_group(feature_name),
+            }
+            for model_name in ml_with_importances:
+                row[f"importance_{model_name}"] = model_feature_importances.get(model_name, {}).get(
+                    feature_name, np.nan
+                )
+            features_summary_rows.append(row)
 
-    features_summary_df = pd.DataFrame(features_summary_rows)
-    features_summary_path = output_dir / "features_summary.csv"
-    features_summary_df.to_csv(features_summary_path, index=False)
+        features_summary_df = pd.DataFrame(features_summary_rows)
+        features_summary_path = output_dir / "features_summary.csv"
+        features_summary_df.to_csv(features_summary_path, index=False)
 
     best_model = metrics_df.iloc[0]["model"] if not metrics_df.empty else ""
+
+    sarima_params: Dict = {}
+    if "sarima" in args.models:
+        sarima_params = {
+            "order": [args.sarima_p, args.sarima_d, args.sarima_q],
+            "seasonal_order": [args.sarima_P, args.sarima_D, args.sarima_Q, args.sarima_s],
+        }
 
     run_metadata = {
         "run_timestamp": datetime.now(timezone.utc).isoformat(),
@@ -408,8 +474,9 @@ def main() -> None:
         "train_file": str(train_path),
         "test_file": str(test_path),
         "models": args.models,
-        "lags": args.lags,
-        "rolling_windows": args.rolling_windows,
+        "sarima_params": sarima_params,
+        "lags": args.lags if ml_models else [],
+        "rolling_windows": args.rolling_windows if ml_models else [],
         "features_used": feature_names,
         "best_model_by_rmse": best_model,
         "artifacts": [
@@ -432,10 +499,10 @@ def main() -> None:
     print(metrics_df.to_string(index=False))
     print("\nArchivos generados:")
     print(f"- {metrics_path}")
-    print(f"- {features_summary_path}")
     for model_name in args.models:
         print(f"- {output_dir / f'predictions_{model_name}.csv'}")
-        print(f"- {models_dir / f'{model_name}_model.joblib'}")
+        suffix = "joblib"
+        print(f"- {models_dir / f'{model_name}_model.{suffix}'}")
     print(f"- {metadata_path}")
 
 
