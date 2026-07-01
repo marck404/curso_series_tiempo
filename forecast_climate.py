@@ -261,7 +261,8 @@ def metric_bundle(y_true: np.ndarray, y_pred: np.ndarray) -> Dict[str, float]:
         "mape": float(mape),
         "smape": float(smape),
     }
-
+    
+## funcion para entrenar el modelo de suavizado exponencial
 
 def train_exponential_smoothing(train_series: pd.Series, args: argparse.Namespace):
     try:
